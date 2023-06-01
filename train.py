@@ -9,8 +9,8 @@ from datasets import load_dataset
 
 from megabyte import Megabyte, MegabyteConfig
 
-PAD_ID = -100
-EOS_ID = -1
+PAD_ID = 257
+EOS_ID = 258
 V = 512
 
 TrainingConfig = namedtuple(
@@ -47,7 +47,8 @@ class MixedCleanedTextDataset(torch.utils.data.IterableDataset):
             while self.buff.numel() < self.max_seq_length:
                 try:
                     doc = next(self.docs_iter)
-                    tokens = torch.frombuffer(copy.deepcopy(doc["text"].encode("utf-8")), dtype=torch.uint8)
+                    tokens = torch.frombuffer(
+                        copy.deepcopy(doc["text"].encode("utf-8")), dtype=torch.uint8).to(self.buff.device)
                     self.buff = torch.cat([self.buff, tokens.to(torch.int32), torch.tensor([self.eos_id])])
                 except StopIteration:
                     self.docs_iter_is_finished_reading = True
@@ -97,6 +98,8 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--data_dir", required=True)
     args = parser.parse_args()
+    
+    torch.set_default_device("cuda")
 
     global EOS_ID, PAD_ID
 

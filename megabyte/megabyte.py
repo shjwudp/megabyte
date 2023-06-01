@@ -6,7 +6,8 @@ import torch.nn.functional as F
 import einops
 from einops import rearrange
 from einops.layers.torch import Rearrange
-from MEGABYTE_pytorch.attend import Attend
+
+from .attend import Attend
 
 MegabyteConfig = namedtuple(
     "MegabyteConfig",
