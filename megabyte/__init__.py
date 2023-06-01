@@ -1,0 +1,1 @@
+from .megabyte import MegabyteConfig, Megabyte
