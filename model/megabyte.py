@@ -1,21 +1,34 @@
+# MIT License
+# Copyright (c) 2023 Jianbin Chang
+
+"""
+The implementation of the transformer is adapted from 
+https://github.com/lucidrains/MEGABYTE-pytorch/blob/main/MEGABYTE_pytorch/megabyte.py
+these codes follow the license:
+"""
+
+# MIT License
+# Copyright (c) 2023 Phil Wang
+
 from collections import namedtuple
 
 import torch
 from torch import nn
 import torch.nn.functional as F
-import einops
 from einops import rearrange
 from einops.layers.torch import Rearrange
 
-from .attend import Attend
+from model.attend import Attend
+
 
 MegabyteConfig = namedtuple(
     "MegabyteConfig",
     [
-        "V", "P", "D_G", "D_L", "T_MAX", "pad_id",
+        "V", "P", "D_G", "D_L", "T_MAX",
         "g_nheads", "g_nlayers",
         "l_nheads", "l_nlayers",
         "initializer_range",
+        "pad_id",
     ]
 )
 
@@ -50,25 +63,25 @@ class Attention(nn.Module):
         self.attend = Attend(
             causal = True,
             flash = flash,
-            dropout = dropout,
+            dropout = dropout
         )
 
         self.dropout = nn.Dropout(dropout)
         self.norm = RMSNorm(dim)
-        self.to_q = nn.Linear(dim, inner_dim, bias=False)
-        self.to_kv = nn.Linear(dim, dim_head * 2, bias=False)
-        self.to_out = nn.Linear(inner_dim, dim, bias=False)
+        self.to_q = nn.Linear(dim, inner_dim, bias = False)
+        self.to_kv = nn.Linear(dim, dim_head * 2, bias = False)
+        self.to_out = nn.Linear(inner_dim, dim, bias = False)
 
-    def forward(self, x, attn_bias=None):
-        h = self.heads
+    def forward(self, x, attn_bias = None):
+        h, device = self.heads, x.device
 
         x = self.norm(x)
-        q, k, v = (self.to_q(x), *self.to_kv(x).chunk(2, dim=-1))
-        q = rearrange(q, "b n (h d) -> b h n d", h=h)
+        q, k, v = (self.to_q(x), *self.to_kv(x).chunk(2, dim = -1))
+        q = rearrange(q, 'b n (h d) -> b h n d', h = h)
 
-        out = self.attend(q, k, v, attn_bias=attn_bias)
+        out = self.attend(q, k, v, attn_bias = attn_bias)
 
-        out = rearrange(out, "b h n d -> b n (h d)")
+        out = rearrange(out, 'b h n d -> b n (h d)')
         return self.to_out(out)
 
 
@@ -174,60 +187,70 @@ class Megabyte(nn.Module):
                 module.bias.data.zero_()
                 module.weight.data.fill_(1.0)
 
-    def patch_embed(self, *, ids, embedder, pos_embedder):
-        b, s, u = ids.shape
-
-        # embedding = tokens embedding + absolute position embedding
-        tokens_embed = embedder(rearrange(ids, "... s u -> ... (s u)", s=s, u=u))
-        if pos_embedder is not None:
-            pos = torch.cat([torch.arange(s*u) for _ in range(b)]).reshape(b, s*u)
-            pos_embed = pos_embedder(pos)
-            h = tokens_embed + pos_embed
-        else:
-            h = tokens_embed
+    def patch_embed(self, ids):
+        B, K, P = ids.shape
+        T = K*P
+        embedder = self.g_embedder
+        pos_embedder = self.g_pos_embedder
 
         # add spatial tokens
-        d = h.shape[-1]
-        h = rearrange(h, "... (s u) d -> ... s (u d)", s=s, u=u, d=d)
-        embed_pad = torch.ones((b, 1, u*d), dtype=torch.long) * self.config.pad_id
-        h, _ = einops.pack([h, embed_pad], "b * d")
+        ids = F.pad(ids[:, :K-1, :], (0, 0, 1, 0), value=self.config.pad_id)
 
-        return h[:, :s, :]
+        # embedding = tokens embedding + absolute position embedding
+        tokens_embed = embedder(rearrange(ids, "B ... -> B (...)", B=B))
+        pos = torch.cat([torch.arange(T) for _ in range(B)]).reshape(B, T)
+        pos_embed = pos_embedder(pos)
+        h = tokens_embed + pos_embed
+        h = rearrange(h, "B (K P) ... -> B K (P ...)", B=B, K=K, P=P)
+
+        return h
 
     def forward(self, ids):
         """
-        ids - input ids, shape [B, T]
+        Input "ids" is for pretraining language model, ids shape is [B, K*P].
+        
+        In the global model, input/output ids[:, :K*(P-1)]/ids[:, :] trains the 
+        ability of global model to predict next patch hidden states.
+
+        In the local model, ids are rewritten into shape [B, K, P], and 
+        input/output ids[:, :, :P-1]/ids[:, :, :] is used to train the local 
+        model's ability to predict the next token.
         """
         B, T = ids.shape
         P = self.config.P
         K = T//P
 
         global_in = self.patch_embed(
-            ids=rearrange(ids, "... (K P) -> ... K P", K=K, P=P),
-            embedder=self.g_embedder, pos_embedder=self.g_pos_embedder
+            ids=rearrange(ids, "... (K P) -> ... K P", K=K, P=P)
         )
         global_out = self.g_transformer(global_in)
 
-        local_in = self.gl_linear(global_out) + self.patch_embed(
-            ids=rearrange(ids, "B (K P) -> (B K) P 1", B=B, K=K, P=P),
-            embedder=self.l_embedder, pos_embedder=None
-        )
+        l_input_ids = rearrange(ids, "B (K P) -> (B K) P", B=B, K=K, P=P)
+        l_input_ids = F.pad(l_input_ids[:, :P-1], (1, 0), value=self.config.pad_id)
+        l_embed = self.l_embedder(l_input_ids)
+        local_in = self.gl_linear(global_out) + l_embed
         local_out = self.l_transformer(local_in)
 
         lm_logits = F.linear(local_out, self.l_embedder.weight)
-        lm_logits = rearrange(lm_logits, "(B K) ... -> B K ...", B=B, K=K)
+        labels = ids
+        loss = F.cross_entropy(
+            rearrange(lm_logits, "... V -> (...) V", V=self.config.V),
+            rearrange(labels, "... -> (...)"),
+            ignore_index=self.config.pad_id,
+        )
 
-        return lm_logits
+        return loss
 
 
 if __name__ == "__main__":
-    V = 256
+    V = 512
     P = 4
     D_G = 512
     D_L = 128
     T = 1024
     B = 2
     K = T//P
+    PAD_ID = 257
 
     config = MegabyteConfig(
         V=V,
@@ -235,21 +258,16 @@ if __name__ == "__main__":
         D_G=D_G,
         D_L=D_L,
         T_MAX=T,
-        pad_id=-100,
         initializer_range=0.02,
         g_nlayers=4,
         g_nheads=16,
         l_nlayers=2,
         l_nheads=8,
+        pad_id=PAD_ID
     )
-
     megabyte = Megabyte(config)
     input_ids = torch.randint(0, 255, (B, T))
-    lm_logits = megabyte(input_ids)
-    loss = F.cross_entropy(
-        rearrange(lm_logits, "B K P V -> (B K) V P", B=B, K=K, P=P, V=V),
-        rearrange(input_ids, "... (K P) -> (... K) P", K=K, P=P),
-    )
+    loss = megabyte(input_ids)
     loss.backward()
 
-    print(lm_logits.shape, loss.norm())
+    print(loss.norm())

@@ -7,7 +7,8 @@ from einops import rearrange
 import torch.nn.functional as F
 from datasets import load_dataset
 
-from megabyte import Megabyte, MegabyteConfig
+from model import Megabyte, MegabyteConfig
+from optimizers import AnyPrecisionAdamW
 
 PAD_ID = 257
 EOS_ID = 258
@@ -59,7 +60,8 @@ class MixedCleanedTextDataset(torch.utils.data.IterableDataset):
             
             if self.buff.numel() < self.max_seq_length:
                 pad_length = self.max_seq_length - self.buff.numel()
-                self.buff = torch.cat(torch.tensor([self.pad_id] * pad_length, dtype=torch.int32), self.buff)
+                pad = torch.tensor([self.pad_id] * pad_length, dtype=torch.int32).to(self.buff.device)
+                self.buff = torch.cat([pad, self.buff])
 
             seq, self.buff = self.buff.split([self.max_seq_length, self.buff.numel() - self.max_seq_length])
             yield seq
@@ -69,7 +71,7 @@ def train(model, dataloader, config):
     P = model.config.P
     V = model.config.V
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr)
+    optimizer = AnyPrecisionAdamW(model.parameters(), lr=config.lr)
 
     log_interval = 1
 
@@ -78,11 +80,7 @@ def train(model, dataloader, config):
         K = T//P
 
         optimizer.zero_grad()
-        lm_logits = model(input_ids)
-        loss = F.cross_entropy(
-            rearrange(lm_logits, "B K P V -> (B K) V P", B=B, K=K, P=P, V=V),
-            rearrange(input_ids, "... (K P) -> (... K) P", K=K, P=P),
-        )
+        loss = model(input_ids)
 
         if i % log_interval == 0:
             print(f"iter-{i}, loss={loss}")
@@ -94,30 +92,30 @@ def train(model, dataloader, config):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch_size", type=int, default=4)
-    parser.add_argument("--max_seq_length", type=int, default=8192)
+    parser.add_argument("--max_seq_length", type=int, default=2048)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--data_dir", required=True)
     args = parser.parse_args()
     
     torch.set_default_device("cuda")
 
-    global EOS_ID, PAD_ID
+    global EOS_ID, PAD_ID, V
 
     config = MegabyteConfig(
         V=V,
-        P=16,
-        D_G=256,
-        D_L=128,
-        T_MAX=8192,
-        pad_id=PAD_ID,
+        P=8,
+        D_G=512,
+        D_L=256,
+        T_MAX=args.max_seq_length,
         g_nheads=16,
         l_nheads=16,
-        g_nlayers=2,
-        l_nlayers=1,
+        g_nlayers=4,
+        l_nlayers=2,
         initializer_range=0.02,
+        pad_id=PAD_ID,
     )
     print("Megabyte model building...")
-    megabyte = Megabyte(config)
+    megabyte = Megabyte(config).to(torch.bfloat16)
     print("Megabyte model has been created.")
 
     training_config = TrainingConfig(lr=args.lr)
