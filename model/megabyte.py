@@ -56,7 +56,6 @@ class Attention(nn.Module):
         flash = False
     ):
         super().__init__()
-        self.scale = dim_head ** -0.5
         self.heads = heads
         inner_dim = dim_head * heads
 
@@ -122,7 +121,7 @@ class Transformer(nn.Module):
     def forward(self, x):
         n = x.shape[-2]
         for attn, ff in self.layers:
-            x = attn(x)
+            x = attn(x) + x
             x = ff(x) + x
 
         return self.norm(x)
@@ -156,20 +155,24 @@ class Megabyte(nn.Module):
             layers=config.g_nlayers,
             dim_head=(config.P*config.D_G)//config.g_nheads,
             heads=config.g_nheads,
+            flash_attn=True,
         )
         self.gl_linear = nn.Sequential(
             Rearrange("... (P D_G) -> ... P D_G", P=P, D_G=D_G),
             nn.Linear(D_G, D_L),
             Rearrange("... P D_L -> (...) P D_L", P=P, D_L=D_L),
         )
-
+        
         self.l_embedder = nn.Embedding(V, D_L)
         self.l_transformer = Transformer(
             dim=config.D_L,
             layers=config.l_nlayers,
             dim_head=config.D_L//config.l_nheads,
             heads=config.l_nheads,
+            flash_attn=True,
         )
+        
+        self.to_logits = nn.Linear(D_L, V)
 
         self._init_weights()
 
@@ -204,6 +207,18 @@ class Megabyte(nn.Module):
         h = rearrange(h, "B (K P) ... -> B K (P ...)", B=B, K=K, P=P)
 
         return h
+    
+    def tokens_to_embed(self, tokens, embedder, pos_embedder):
+        """
+        tokens - shape [B, T]
+        """
+        B, T = tokens.shape
+        token_embed = embedder(tokens)
+        pos = torch.cat([torch.arange(T) for _ in range(B)]).reshape(B, T)
+        pos_embed = pos_embedder(pos)
+        embed = token_embed + pos_embed
+        
+        return embed
 
     def forward(self, ids):
         """
@@ -219,22 +234,34 @@ class Megabyte(nn.Module):
         B, T = ids.shape
         P = self.config.P
         K = T//P
+        D_G = self.config.D_G
 
-        global_in = self.patch_embed(
-            ids=rearrange(ids, "... (K P) -> ... K P", K=K, P=P)
+        g_pad_ids = F.pad(
+            rearrange(ids, "... (K P) -> ... K P", K=K, P=P),
+            (0, 0, 1, -1),
+            value=self.config.pad_id
+        )
+        g_pad_embed = self.tokens_to_embed(
+            tokens=rearrange(g_pad_ids, "B ... -> B (...)", B=B),
+            embedder=self.g_embedder,
+            pos_embedder=self.g_pos_embedder,
+        )
+        global_in = rearrange(
+            g_pad_embed,
+            "... (K P) D_G -> ... K (P D_G)", K=K, P=P, D_G=D_G,
         )
         global_out = self.g_transformer(global_in)
 
         l_input_ids = rearrange(ids, "B (K P) -> (B K) P", B=B, K=K, P=P)
-        l_input_ids = F.pad(l_input_ids[:, :P-1], (1, 0), value=self.config.pad_id)
+        l_input_ids = F.pad(l_input_ids, (1, -1), value=self.config.pad_id)
         l_embed = self.l_embedder(l_input_ids)
         local_in = self.gl_linear(global_out) + l_embed
         local_out = self.l_transformer(local_in)
 
-        lm_logits = F.linear(local_out, self.l_embedder.weight)
+        lm_logits = self.to_logits(local_out)
         labels = ids
         loss = F.cross_entropy(
-            rearrange(lm_logits, "... V -> (...) V", V=self.config.V),
+            rearrange(lm_logits, "... V ->  (...) V", V=self.config.V),
             rearrange(labels, "... -> (...)"),
             ignore_index=self.config.pad_id,
         )

@@ -4,7 +4,7 @@
 import torch
 import torch.nn.functional as F
 from einops import rearrange
-from megabyte import MegabyteConfig, Megabyte
+from model import MegabyteConfig, Megabyte
 
 V = 512
 P = 4
@@ -23,9 +23,9 @@ config = MegabyteConfig(
     T_MAX=T,
     initializer_range=0.02,
     g_nlayers=4,
-    g_nheads=16,
+    g_nheads=32,
     l_nlayers=2,
-    l_nheads=8,
+    l_nheads=2,
     pad_id=PAD_ID
 )
 megabyte = Megabyte(config)
