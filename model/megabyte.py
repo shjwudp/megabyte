@@ -265,8 +265,9 @@ class Megabyte(nn.Module):
             rearrange(labels, "... -> (...)"),
             ignore_index=self.config.pad_id,
         )
+        lm_logits = rearrange(lm_logits, "(B K) P ... -> B (K P) ...", B=B, K=K, P=P)
 
-        return loss
+        return loss, lm_logits
 
 
 if __name__ == "__main__":
@@ -294,7 +295,7 @@ if __name__ == "__main__":
     )
     megabyte = Megabyte(config)
     input_ids = torch.randint(0, 255, (B, T))
-    loss = megabyte(input_ids)
+    loss, _ = megabyte(input_ids)
     loss.backward()
 
     print(loss.norm())

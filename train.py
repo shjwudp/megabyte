@@ -97,7 +97,7 @@ def train(args, model, dataloader):
     time_stone = time.time()
     total_loss = 0
     for iter_i, ids in enumerate(dataloader, 1):
-        loss = model(ids=ids)
+        loss, _ = model(ids=ids)
 
         loss /= args.gradient_accumulation_steps
         total_loss += loss.detach().float()

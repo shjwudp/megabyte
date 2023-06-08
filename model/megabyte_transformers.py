@@ -1,7 +1,7 @@
 from model.megabyte import MegabyteConfig as NativeMegabyteConfig, Megabyte
 
 import torch
-import copy
+import torch.nn.functional as F
 
 from transformers import PretrainedConfig, PreTrainedModel, GenerationMixin
 from transformers.modeling_outputs import CausalLMOutput
@@ -23,6 +23,8 @@ class MegabyteConfig(PretrainedConfig):
         l_nlayers,
         initializer_range,
         pad_id,
+        bos_token_id,
+        eos_token_id,
         **kwargs,
     ):
         self.V = V
@@ -36,6 +38,9 @@ class MegabyteConfig(PretrainedConfig):
         self.l_nlayers = l_nlayers
         self.initializer_range = initializer_range
         self.pad_id = pad_id
+        self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
+        self.is_encoder_decoder = False
         super().__init__(**kwargs)
 
 
@@ -57,6 +62,7 @@ class MegabyteLMHeadModel(PreTrainedModel, GenerationMixin):
             initializer_range=config.initializer_range,
             pad_id=config.pad_id,
         )
+        self.config = config
         self.model = Megabyte(native_config)
 
     # TODO: Rewrite the forward function to be compatible with GenerationMixin.
@@ -66,18 +72,24 @@ class MegabyteLMHeadModel(PreTrainedModel, GenerationMixin):
         return_dict = None,
         **deprecated_arguments,
     ):
-        loss = self.model(input_ids)
+        loss, lm_logits = self.model(input_ids)
         if not return_dict:
             return loss
         
         return CausalLMOutput(
             loss=loss,
-            lm_logits=None,
+            logits=lm_logits,
             hidden_states=None,
             attentions=None,
         )
-    
+
     def prepare_inputs_for_generation(self, input_ids, **kwargs) -> dict:
+        _, T = input_ids.shape
+        P = self.config.P
+
+        # Add a character at the end as a placeholder, and padding input_ids length to an integer multiple of P.
+        input_ids = F.pad(input_ids, ((P-1)-T%P, 1), value=self.config.pad_id)
+
         return {"input_ids": input_ids}
 
 
@@ -87,9 +99,18 @@ class MegabyteTokenizer:
         self.eos_token_id = eos_token_id
         
     def __call__(self, text, return_tensors="pt"):
-        tokens = torch.frombuffer(copy.deepcopy(text.encode("utf-8")), dtype=torch.uint8).to(torch.int64)
+        tokens = torch.frombuffer(bytearray(text.encode("utf-8")), dtype=torch.uint8).to(torch.int64)
         tokens = tokens.reshape(1, tokens.numel())
         return {"input_ids": tokens}
+    
+    def decode(self, ids):
+        texts = []
+        for id_list in ids.tolist():
+            line_ids = filter(lambda x: 0<=x and x<256, id_list)
+            text = bytearray(list(line_ids)).decode("utf-8")
+            texts.append(text)
+
+        return texts
 
 if __name__ == "__main__":
     V = 512
@@ -100,6 +121,7 @@ if __name__ == "__main__":
     B = 2
     K = T//P
     PAD_ID = 257
+    EOS_ID = 258
 
     config = MegabyteConfig(
         V=V,
@@ -112,11 +134,15 @@ if __name__ == "__main__":
         g_nheads=16,
         l_nlayers=2,
         l_nheads=8,
-        pad_id=PAD_ID
+        pad_id=PAD_ID,
+        bos_token_id=EOS_ID,
+        eos_token_id=EOS_ID,
     )
+    tokenizer = MegabyteTokenizer(eos_token_id=EOS_ID)
     model = MegabyteLMHeadModel(config)
-    input_ids = torch.randint(0, 255, (B, T))
-    loss = model(input_ids)
-    loss.backward()
+    
+    inputs = tokenizer("Today is", return_tensors="pt")
+    outputs = model.generate(**inputs, max_new_tokens=5, return_dict_in_generate=True, output_scores=True)
 
-    print(loss.norm())
+    texts = tokenizer.decode(outputs.sequences)
+    print(texts)
