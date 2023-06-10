@@ -28,7 +28,7 @@ MegabyteConfig = namedtuple(
         "g_nheads", "g_nlayers",
         "l_nheads", "l_nlayers",
         "initializer_range",
-        "pad_id",
+        "pad_id", "eos_id",
     ]
 )
 
@@ -279,6 +279,7 @@ if __name__ == "__main__":
     B = 2
     K = T//P
     PAD_ID = 257
+    EOS_ID = 258
 
     config = MegabyteConfig(
         V=V,
@@ -291,7 +292,8 @@ if __name__ == "__main__":
         g_nheads=16,
         l_nlayers=2,
         l_nheads=8,
-        pad_id=PAD_ID
+        pad_id=PAD_ID,
+        eos_id=EOS_ID,
     )
     megabyte = Megabyte(config)
     input_ids = torch.randint(0, 255, (B, T))

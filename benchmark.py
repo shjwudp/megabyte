@@ -1,5 +1,4 @@
 import argparse
-from collections import namedtuple
 from itertools import chain
 
 import torch
@@ -35,12 +34,13 @@ def get_model_and_tokenizer(args):
             l_nlayers=6,
             initializer_range=0.02,
             pad_id=PAD_ID,
+            eos_id=EOS_ID,
         )
         model = Megabyte(config).to(torch.bfloat16)
         tokenizer = MegabyteTokenizer(EOS_ID)
     elif args.model == "gpt2":
         tokenizer = GPT2Tokenizer.from_pretrained(args.model_path)
-        config = GPT2Config(args.model_path)
+        config = GPT2Config.from_pretrained(args.model_path)
         model = GPT2LMHeadModel(config)
     else:
         raise Exception(f"model {args.model} is not supported")
@@ -92,6 +92,7 @@ def prepare_dataloader(args, tokenizer):
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset, shuffle=True, collate_fn=default_data_collator,
         batch_size=args.batch_size,
+        generator=torch.Generator(device="cuda") if args.gpu else torch.Generator(device="cpu"),
     )
 
     return train_dataloader
@@ -100,7 +101,8 @@ def prepare_dataloader(args, tokenizer):
 def train(args, model, dataloader):
     print("start training")
     print("args -", json.dumps(vars(args), sort_keys=True, indent=4))
-    print("model.config -", json.dumps(model.config._asdict(), sort_keys=True, indent=4))
+    model_config = model.config._asdict() if args.model == "megabyte" else model.config.to_dict()
+    print("model.config -", json.dumps(model_config, sort_keys=True, indent=4))
     
     wandb.login()
     run = wandb.init(
@@ -154,6 +156,7 @@ def main():
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--max_seq_length", type=int, default=2048)
     parser.add_argument("--model", choices=["gpt2", "megabyte"], required=True)
+    parser.add_argument("--model_path", default=None)
     parser.add_argument("--overwrite_cache", action="store_true")
     parser.add_argument("--dataset_name", required=True)
     parser.add_argument("--dataset_config_name", required=True)

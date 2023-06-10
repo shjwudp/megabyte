@@ -23,7 +23,6 @@ class MegabyteConfig(PretrainedConfig):
         l_nlayers,
         initializer_range,
         pad_id,
-        bos_token_id,
         eos_token_id,
         **kwargs,
     ):
@@ -38,8 +37,8 @@ class MegabyteConfig(PretrainedConfig):
         self.l_nlayers = l_nlayers
         self.initializer_range = initializer_range
         self.pad_id = pad_id
-        self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
+        self.bos_token_id = eos_token_id
         self.is_encoder_decoder = False
         super().__init__(**kwargs)
 
@@ -61,11 +60,30 @@ class MegabyteLMHeadModel(PreTrainedModel, GenerationMixin):
             l_nlayers=config.l_nlayers,
             initializer_range=config.initializer_range,
             pad_id=config.pad_id,
+            eos_id=config.eos_token_id,
         )
         self.config = config
         self.model = Megabyte(native_config)
 
-    # TODO: Rewrite the forward function to be compatible with GenerationMixin.
+    @classmethod
+    def from_native_megabyte(cls, native_model):
+        native_config = native_model.config
+        config = MegabyteConfig(
+            V=native_config.V,
+            P=native_config.P,
+            D_G=native_config.D_G,
+            D_L=native_config.D_L,
+            T_MAX=native_config.T_MAX,
+            g_nheads=native_config.g_nheads,
+            g_nlayers=native_config.g_nlayers,
+            l_nheads=native_config.l_nheads,
+            l_nlayers=native_config.l_nlayers,
+            initializer_range=native_config.initializer_range,
+            pad_id=native_config.pad_id,
+            eos_token_id=native_config.eos_id,
+        )
+        return cls(config)
+
     def forward(
         self,
         input_ids,
@@ -135,7 +153,6 @@ if __name__ == "__main__":
         l_nlayers=2,
         l_nheads=8,
         pad_id=PAD_ID,
-        bos_token_id=EOS_ID,
         eos_token_id=EOS_ID,
     )
     tokenizer = MegabyteTokenizer(eos_token_id=EOS_ID)
