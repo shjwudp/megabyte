@@ -39,7 +39,7 @@ config = MegabyteConfig(
 megabyte = Megabyte(config)
 input_ids = torch.randint(0, 255, (B, T))
 # Autoregressive learning, megabyte will learn from the inputs input[:, :-1], labels input[:, :], and learn to predict the next token.
-loss = megabyte(input_ids)
+loss = megabyte(input_ids, return_loss=True).loss
 loss.backward()
 
 print(loss.norm())
@@ -66,6 +66,16 @@ outputs = lm_head_megabyte.generate(
 texts = tokenizer.decode(outputs.sequences)
 print(texts)
 ```
+
+## Benchmark
+
+You can use the benchmark.py script for Megabyte's performance measurement. The following table compares the training of Megabyte and GPT2 on wikitext-103-v1 with the same parameter scale.
+
+| model         | # of parameters | training speed (KB/s) | GPU Memory Allocated % | eval loss | eval loss bpc |
+| :------------ | :-------------- | :-------------------- | :--------------------- | :-------- | :------------ |
+| gpt2          | 124439808       | 143.6817123           | 42.97                  | 5.06      | 1.10          |
+| megabyte(P=8) | 132278528       | 189.1252955           | 17.62                  | 1.13      | 1.13          |
+|               |                 |                       |                        |           |               |
 
 ## Citation
 

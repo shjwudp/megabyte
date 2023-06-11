@@ -33,18 +33,6 @@ MegabyteConfig = namedtuple(
 )
 
 
-class RMSNorm(nn.Module):
-    def __init__(self, dim, eps=1e-8):
-        super().__init__()
-        self.scale = dim ** -0.5
-        self.eps = eps
-        self.g = nn.Parameter(torch.ones(dim))
-
-    def forward(self, x):
-        norm = torch.norm(x, dim=-1, keepdim=True) * self.scale
-        return x / norm.clamp(min=self.eps) * self.g
-
-
 class Attention(nn.Module):
     def __init__(
         self,
@@ -66,7 +54,7 @@ class Attention(nn.Module):
         )
 
         self.dropout = nn.Dropout(dropout)
-        self.norm = RMSNorm(dim)
+        self.norm = nn.LayerNorm(dim)
         self.to_q = nn.Linear(dim, inner_dim, bias = False)
         self.to_kv = nn.Linear(dim, dim_head * 2, bias = False)
         self.to_out = nn.Linear(inner_dim, dim, bias = False)
@@ -86,7 +74,7 @@ class Attention(nn.Module):
 
 def FeedForward(*, dim, mult = 4, dropout = 0.):
     return nn.Sequential(
-        RMSNorm(dim),
+        nn.LayerNorm(dim),
         nn.Linear(dim, dim * mult),
         nn.GELU(),
         nn.Dropout(dropout),
@@ -116,15 +104,19 @@ class Transformer(nn.Module):
                 FeedForward(dim=dim, mult=ff_mult, dropout=ff_dropout),
             ]))
 
-        self.norm = RMSNorm(dim)
-
     def forward(self, x):
-        n = x.shape[-2]
         for attn, ff in self.layers:
             x = attn(x) + x
             x = ff(x) + x
 
-        return self.norm(x)
+        return x
+
+MegabyteOutput = namedtuple(
+    "MegabyteOutput",
+    [
+        "lm_logits", "loss", "metrics",
+    ]
+)
 
 
 class Megabyte(nn.Module):
@@ -197,7 +189,7 @@ class Megabyte(nn.Module):
         pos_embedder = self.g_pos_embedder
 
         # add spatial tokens
-        ids = F.pad(ids[:, :K-1, :], (0, 0, 1, 0), value=self.config.pad_id)
+        ids = F.pad(ids, (0, 0, 1, -1), value=self.config.pad_id)
 
         # embedding = tokens embedding + absolute position embedding
         tokens_embed = embedder(rearrange(ids, "B ... -> B (...)", B=B))
@@ -207,7 +199,7 @@ class Megabyte(nn.Module):
         h = rearrange(h, "B (K P) ... -> B K (P ...)", B=B, K=K, P=P)
 
         return h
-    
+
     def tokens_to_embed(self, tokens, embedder, pos_embedder):
         """
         tokens - shape [B, T]
@@ -220,7 +212,7 @@ class Megabyte(nn.Module):
         
         return embed
 
-    def forward(self, ids):
+    def forward(self, ids, return_loss=False, return_metrics=False):
         """
         Input "ids" is for pretraining language model, ids shape is [B, K*P].
         
@@ -235,6 +227,8 @@ class Megabyte(nn.Module):
         P = self.config.P
         K = T//P
         D_G = self.config.D_G
+        loss = None
+        metrics = None
 
         g_pad_ids = F.pad(
             rearrange(ids, "... (K P) -> ... K P", K=K, P=P),
@@ -252,22 +246,37 @@ class Megabyte(nn.Module):
         )
         global_out = self.g_transformer(global_in)
 
+        if return_metrics:
+            metrics = {
+                "global_in_norm": global_in.norm(),
+                "global_out_norm": global_out.norm(),
+            }
+
         l_input_ids = rearrange(ids, "B (K P) -> (B K) P", B=B, K=K, P=P)
         l_input_ids = F.pad(l_input_ids, (1, -1), value=self.config.pad_id)
         l_embed = self.l_embedder(l_input_ids)
         local_in = self.gl_linear(global_out) + l_embed
         local_out = self.l_transformer(local_in)
 
+        if return_metrics:
+            metrics.update({
+                "local_in_norm": local_in.norm(),
+                "local_out_norm": local_out.norm(),
+            })
+
         lm_logits = self.to_logits(local_out)
-        labels = ids
-        loss = F.cross_entropy(
-            rearrange(lm_logits, "... V ->  (...) V", V=self.config.V),
-            rearrange(labels, "... -> (...)"),
-            ignore_index=self.config.pad_id,
-        )
+
+        if return_loss:
+            labels = ids
+            loss = F.cross_entropy(
+                rearrange(lm_logits, "... V ->  (...) V", V=self.config.V),
+                rearrange(labels, "... -> (...)"),
+                ignore_index=self.config.pad_id,
+            )
+
         lm_logits = rearrange(lm_logits, "(B K) P ... -> B (K P) ...", B=B, K=K, P=P)
 
-        return loss, lm_logits
+        return MegabyteOutput(lm_logits=lm_logits, loss=loss, metrics=metrics)
 
 
 if __name__ == "__main__":
@@ -297,7 +306,7 @@ if __name__ == "__main__":
     )
     megabyte = Megabyte(config)
     input_ids = torch.randint(0, 255, (B, T))
-    loss, _ = megabyte(input_ids)
+    loss = megabyte(input_ids).loss
     loss.backward()
 
     print(loss.norm())

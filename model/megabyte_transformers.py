@@ -12,18 +12,18 @@ class MegabyteConfig(PretrainedConfig):
 
     def __init__(
         self,
-        V,
-        P,
-        D_G,
-        D_L,
-        T_MAX,
-        g_nheads,
-        g_nlayers,
-        l_nheads,
-        l_nlayers,
-        initializer_range,
-        pad_id,
-        eos_token_id,
+        V=512,
+        P=8,
+        D_G=128,
+        D_L=256,
+        T_MAX=2048,
+        g_nheads=16,
+        l_nheads=4,
+        g_nlayers=12,
+        l_nlayers=6,
+        initializer_range=0.02,
+        pad_id=257,
+        eos_token_id=258,
         **kwargs,
     ):
         self.V = V
@@ -63,7 +63,7 @@ class MegabyteLMHeadModel(PreTrainedModel, GenerationMixin):
             eos_id=config.eos_token_id,
         )
         self.config = config
-        self.model = Megabyte(native_config)
+        self.inner_model = Megabyte(native_config)
 
     @classmethod
     def from_native_megabyte(cls, native_model):
@@ -82,7 +82,9 @@ class MegabyteLMHeadModel(PreTrainedModel, GenerationMixin):
             pad_id=native_config.pad_id,
             eos_token_id=native_config.eos_id,
         )
-        return cls(config)
+        model = cls(config)
+        model.inner_model.load_state_dict(native_model.state_dict())
+        return model
 
     def forward(
         self,
@@ -90,13 +92,13 @@ class MegabyteLMHeadModel(PreTrainedModel, GenerationMixin):
         return_dict = None,
         **deprecated_arguments,
     ):
-        loss, lm_logits = self.model(input_ids)
+        output = self.inner_model(input_ids)
         if not return_dict:
-            return loss
+            return output.loss
         
         return CausalLMOutput(
-            loss=loss,
-            logits=lm_logits,
+            loss=output.loss,
+            logits=output.lm_logits,
             hidden_states=None,
             attentions=None,
         )
@@ -112,7 +114,7 @@ class MegabyteLMHeadModel(PreTrainedModel, GenerationMixin):
 
 
 class MegabyteTokenizer:
-    def __init__(self, eos_token_id):
+    def __init__(self, eos_token_id=258):
         super().__init__()
         self.eos_token_id = eos_token_id
         
