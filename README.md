@@ -1,6 +1,6 @@
 # Megabyte
 
-This code repository implements [MEGABYTE](https://arxiv.org/abs/2305.07185) with pytorch and seeks to reproduce the implementation described in the paper as much as possible.
+This repository implements [MEGABYTE](https://arxiv.org/abs/2305.07185) with pytorch, and tries to explore the best practice of Megabyte architecture. The original architecture described in the paper is implemented in [megabyte.py](./model/megabyte.py), and the best practices are implemented in [megabyte_in_action.py](./model/megabyte_in_action.py).
 
 Megabyte is a new architecture that overcomes the performance defects of bytes end-to-end training and makes tokenization-free autoregressive sequence modeling possible.
 
@@ -71,10 +71,11 @@ print(texts)
 
 You can use the [benchmark.py](https://github.com/shjwudp/megabyte/blob/main/benchmark.py) script for Megabyte's performance measurement. The following table compares the training of Megabyte and GPT2 on wikitext-103-v1 with the same parameter scale.
 
-| model         | # of parameters | training speed (KB/s) | GPU Memory Allocated % | eval loss | eval loss bpc |
-| :------------ | :-------------- | :-------------------- | :--------------------- | :-------- | :------------ |
-| gpt2          | 124439808       | 143.6817123           | 42.97                  | 5.06      | 1.10          |
-| megabyte(P=8) | 132278528       | 189.1252955           | 17.62                  | 1.13      | 1.13          |
+| model                   | # of parameters | training speed (KB/s) | GPU Memory Allocated % | eval loss | eval loss bpc |
+| :---------------------- | :-------------- | :-------------------- | :--------------------- | :-------- | :------------ |
+| gpt2                    | 124439808       | 143.68                | 42.97                  | 5.06      | 1.10          |
+| megabyte(P=8)           | 132278528       | 189.13                | 17.62                  | 1.13      | 1.13          |
+| megabyte_in_action(P=8) | 132,573,696     | 188.35                | 17.68                  | 1.10      | 1.10          |
 
 ## Citation
 

@@ -13,12 +13,17 @@ import wandb
 import json
 import time
 
-from model import Megabyte, MegabyteConfig
 from optimizers import Adafactor
 
 
 def get_model_and_tokenizer(args):
     if args.model == "megabyte":
+        from model import Megabyte, MegabyteConfig
+    elif args.model == "megabyte_in_action":
+        from model.megabyte_in_action import Megabyte, MegabyteConfig
+
+    if args.model in ["megabyte", "megabyte_in_action"]:
+        from model import Megabyte, MegabyteConfig
         PAD_ID = 257
         EOS_ID = 258
         V = 512
@@ -42,19 +47,6 @@ def get_model_and_tokenizer(args):
         tokenizer = GPT2Tokenizer.from_pretrained(args.model_path)
         config = GPT2Config.from_pretrained(args.model_path)
         model = GPT2LMHeadModel(config).to(torch.bfloat16)
-    elif args.model == "MEGABYTE_pytorch":
-        EOS_ID = 258
-        from MEGABYTE_pytorch import MEGABYTE
-        tokenizer = MegabyteTokenizer(EOS_ID)
-        model = MEGABYTE(
-            num_tokens=args.max_seq_length,
-            dim=768,
-            max_seq_len=(args.max_seq_length, 8),
-            depth=(12, 6),
-            dim_head=64,
-            heads=12,
-            flash_attn=True,
-        ).to(torch.bfloat16)
     else:
         raise Exception(f"model {args.model} is not supported")
 
@@ -196,7 +188,10 @@ def train(args, model, dataloader, eval_dataloader):
     wandb.log({"eval_loss": eval_loss, "eval_spend_time": spend_time})
 
     if args.save:
-        torch.save(model.state_dict(), args.save)
+        if args.model == "megabyte":
+            from model.megabyte_transformers import MegabyteLMHeadModel
+            model = MegabyteLMHeadModel.from_native_megabyte(model)
+        model.save_pretrained(args.save)
 
 
 class MegabyteTokenizer:
@@ -217,7 +212,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--max_seq_length", type=int, default=2048)
-    parser.add_argument("--model", choices=["gpt2", "megabyte", "MEGABYTE_pytorch"], required=True)
+    parser.add_argument("--model", choices=["gpt2", "megabyte", "megabyte_in_action"], required=True)
     parser.add_argument("--model_path", default=None)
     parser.add_argument("--overwrite_cache", action="store_true")
     parser.add_argument("--dataset_name", required=True)

@@ -1,5 +1,3 @@
-from model.megabyte import MegabyteConfig as NativeMegabyteConfig, Megabyte
-
 import torch
 import torch.nn.functional as F
 
@@ -46,25 +44,6 @@ class MegabyteConfig(PretrainedConfig):
 class MegabyteLMHeadModel(PreTrainedModel, GenerationMixin):
     config_class = MegabyteConfig
 
-    def __init__(self, config):
-        super().__init__(config)
-        native_config = NativeMegabyteConfig(
-            V=config.V,
-            P=config.P,
-            D_G=config.D_G,
-            D_L=config.D_L,
-            T_MAX=config.T_MAX,
-            g_nheads=config.g_nheads,
-            g_nlayers=config.g_nlayers,
-            l_nheads=config.l_nheads,
-            l_nlayers=config.l_nlayers,
-            initializer_range=config.initializer_range,
-            pad_id=config.pad_id,
-            eos_id=config.eos_token_id,
-        )
-        self.config = config
-        self.inner_model = Megabyte(native_config)
-
     @classmethod
     def from_native_megabyte(cls, native_model):
         native_config = native_model.config
@@ -83,7 +62,8 @@ class MegabyteLMHeadModel(PreTrainedModel, GenerationMixin):
             eos_token_id=native_config.eos_id,
         )
         model = cls(config)
-        model.inner_model.load_state_dict(native_model.state_dict())
+        model.config = config
+        model.inner_model = native_model
         return model
 
     def forward(
@@ -131,37 +111,3 @@ class MegabyteTokenizer:
             texts.append(text)
 
         return texts
-
-if __name__ == "__main__":
-    V = 512
-    P = 4
-    D_G = 512
-    D_L = 128
-    T = 1024
-    B = 2
-    K = T//P
-    PAD_ID = 257
-    EOS_ID = 258
-
-    config = MegabyteConfig(
-        V=V,
-        P=P,
-        D_G=D_G,
-        D_L=D_L,
-        T_MAX=T,
-        initializer_range=0.02,
-        g_nlayers=4,
-        g_nheads=16,
-        l_nlayers=2,
-        l_nheads=8,
-        pad_id=PAD_ID,
-        eos_token_id=EOS_ID,
-    )
-    tokenizer = MegabyteTokenizer(eos_token_id=EOS_ID)
-    model = MegabyteLMHeadModel(config)
-    
-    inputs = tokenizer("Today is", return_tensors="pt")
-    outputs = model.generate(**inputs, max_new_tokens=5, return_dict_in_generate=True, output_scores=True)
-
-    texts = tokenizer.decode(outputs.sequences)
-    print(texts)
