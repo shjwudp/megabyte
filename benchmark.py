@@ -23,7 +23,6 @@ def get_model_and_tokenizer(args):
         from model.megabyte_in_action import Megabyte, MegabyteConfig
 
     if args.model in ["megabyte", "megabyte_in_action"]:
-        from model import Megabyte, MegabyteConfig
         PAD_ID = 257
         EOS_ID = 258
         V = 512

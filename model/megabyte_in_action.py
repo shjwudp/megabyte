@@ -17,6 +17,7 @@ from torch import nn
 import torch.nn.functional as F
 from einops import rearrange
 from einops.layers.torch import Rearrange
+import math
 
 from model.attend import Attend
 
@@ -97,6 +98,7 @@ class Transformer(nn.Module):
     ):
         super().__init__()
         self.layers = nn.ModuleList([])
+        self.nheads = heads
 
         for _ in range(layers):
             self.layers.append(nn.ModuleList([
@@ -104,9 +106,20 @@ class Transformer(nn.Module):
                 FeedForward(dim=dim, mult=ff_mult, dropout=ff_dropout),
             ]))
 
+
+    def alibi_bias(self, T):
+        n = self.nheads
+        m = torch.tensor([2**((-8/n)*i) for i in range(1, n+1)])
+
+        bias = torch.arange(T)
+
+        return bias.view(1, 1, T) * m.view(n, 1, 1)
+
     def forward(self, x):
+        _, T, _ = x.shape
+        attn_bias = self.alibi_bias(T).to(x.dtype)
         for attn, ff in self.layers:
-            x = attn(x) + x
+            x = attn(x, attn_bias=attn_bias) + x
             x = ff(x) + x
 
         return x
@@ -117,6 +130,18 @@ MegabyteOutput = namedtuple(
         "lm_logits", "loss", "metrics",
     ]
 )
+
+def sinusoidal_positional_embedding(length, dim, cycle=1e4):
+    assert dim % 2 == 0
+    pe = torch.zeros(length, dim)
+    pos = torch.arange(0, length)
+    dim_i = math.log(cycle) * torch.exp(-torch.arange(0, end=dim, step=2) / dim)
+    sin_cos_i = pos.view(length, 1) * dim_i.view(1, dim//2)
+    
+    pe[:, 0::2] = torch.sin(sin_cos_i)
+    pe[:, 1::2] = torch.cos(sin_cos_i)
+    
+    return pe
 
 
 class Megabyte(nn.Module):
@@ -140,8 +165,7 @@ class Megabyte(nn.Module):
         D_G = config.D_G
         D_L = config.D_L
 
-        self.g_embedder = nn.Embedding(V, D_G)
-        self.g_pos_embedder = nn.Embedding(config.T_MAX*2, D_G)
+        self.to_embed = nn.Embedding(V, D_G)
         self.g_transformer = Transformer(
             dim=config.P*config.D_G,
             layers=config.g_nlayers,
@@ -182,36 +206,6 @@ class Megabyte(nn.Module):
                 module.bias.data.zero_()
                 module.weight.data.fill_(1.0)
 
-    def patch_embed(self, ids):
-        B, K, P = ids.shape
-        T = K*P
-        embedder = self.g_embedder
-        pos_embedder = self.g_pos_embedder
-
-        # add spatial tokens
-        ids = F.pad(ids, (0, 0, 1, -1), value=self.config.pad_id)
-
-        # embedding = tokens embedding + absolute position embedding
-        tokens_embed = embedder(rearrange(ids, "B ... -> B (...)", B=B))
-        pos = torch.cat([torch.arange(T) for _ in range(B)]).reshape(B, T)
-        pos_embed = pos_embedder(pos)
-        h = tokens_embed + pos_embed
-        h = rearrange(h, "B (K P) ... -> B K (P ...)", B=B, K=K, P=P)
-
-        return h
-
-    def tokens_to_embed(self, tokens, embedder, pos_embedder):
-        """
-        tokens - shape [B, T]
-        """
-        B, T = tokens.shape
-        token_embed = embedder(tokens)
-        pos = torch.cat([torch.arange(T) for _ in range(B)]).reshape(B, T)
-        pos_embed = pos_embedder(pos)
-        embed = token_embed + pos_embed
-        
-        return embed
-
     def forward(self, ids, return_loss=False, return_metrics=False):
         """
         Input "ids" is for pretraining language model, ids shape is [B, K*P].
@@ -235,11 +229,7 @@ class Megabyte(nn.Module):
             (0, 0, 1, 0),
             value=self.config.pad_id
         )
-        pad_embed = self.tokens_to_embed(
-            tokens=rearrange(pad_ids, "B ... -> B (...)", B=B),
-            embedder=self.g_embedder,
-            pos_embedder=self.g_pos_embedder,
-        )
+        pad_embed = self.to_embed(rearrange(pad_ids, "B ... -> B (...)", B=B))
         pad_embed = rearrange(
             pad_embed,
             "... (K P) D_G -> ... K P D_G", K=K+1, P=P, D_G=D_G
