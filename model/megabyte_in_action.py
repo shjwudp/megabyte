@@ -117,7 +117,7 @@ class Transformer(nn.Module):
 
     def forward(self, x):
         _, T, _ = x.shape
-        attn_bias = self.alibi_bias(T).to(x.dtype)
+        attn_bias = self.alibi_bias(T).to(x.dtype).to(x.device)
         for attn, ff in self.layers:
             x = attn(x, attn_bias=attn_bias) + x
             x = ff(x) + x
