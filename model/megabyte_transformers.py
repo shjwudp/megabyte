@@ -1,8 +1,9 @@
 import torch
 import torch.nn.functional as F
-
 from transformers import PretrainedConfig, PreTrainedModel, GenerationMixin
 from transformers.modeling_outputs import CausalLMOutput
+
+from model.megabyte import MegabyteConfig as InnerConfig
 
 
 class MegabyteConfig(PretrainedConfig):
@@ -39,10 +40,34 @@ class MegabyteConfig(PretrainedConfig):
         self.bos_token_id = eos_token_id
         self.is_encoder_decoder = False
         super().__init__(**kwargs)
+        
+    def to_inner_config(self):
+        return InnerConfig(
+            V=self.V,
+            P=self.P,
+            D_G=self.D_G,
+            D_L=self.D_L,
+            T_MAX=self.T_MAX,
+            g_nheads=self.g_nheads,
+            g_nlayers=self.g_nlayers,
+            l_nheads=self.l_nlayers,
+            l_nlayers=self.l_nlayers,
+            initializer_range=self.initializer_range,
+            pad_id=self.pad_id,
+            eos_id=self.eos_token_id,
+        )
 
 
 class MegabyteLMHeadModel(PreTrainedModel, GenerationMixin):
     config_class = MegabyteConfig
+    
+    def __init__(self, config, InnerModel=None):
+        super().__init__(config)
+        if not InnerModel:
+            return
+
+        self.config = config
+        self.inner_model = InnerModel(config.to_inner_config())
 
     @classmethod
     def from_native_megabyte(cls, native_model):
