@@ -2,22 +2,14 @@ import argparse
 from itertools import chain
 import json
 import time
-import logging
 import os
 from collections import namedtuple
 from contextlib import contextmanager
 import contextlib
 
 import torch
-import datasets
-import transformers
 from datasets import load_dataset
-from transformers import (
-    GPT2Tokenizer,
-    GPT2LMHeadModel,
-    GPT2Config,
-    default_data_collator,
-)
+from transformers import default_data_collator
 import wandb
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
@@ -60,6 +52,7 @@ def fixed_seq_length_of_datasets(datasets, fixed_seq_length, load_from_cache_fil
     lm_datasets = datasets.map(
         group_texts,
         batched=True,
+        num_proc=os.cpu_count(),
         load_from_cache_file=load_from_cache_file,
         desc=f"Grouping texts in chunks of {block_size}",
     )
@@ -98,7 +91,7 @@ def prepare_dataloader(args, tokenizer, dp):
         train_dataset, shuffle=False, collate_fn=default_data_collator,
         batch_size=per_device_train_batch_size,
         sampler=train_sampler,
-        generator=torch.Generator(device="cuda"),
+        num_workers=1,
     )
     if args.length_expolation_eval:
         eval_dataloaders = []
@@ -150,7 +143,7 @@ def train(args, model, train_dataloader, eval_dataloader_or_dataloaders, dp):
     def model_forward(model, ids):
         output = model(ids=ids, return_loss=True, return_metrics=True)
         loss = output.loss
-        # wandb.log(output.metrics, commit=False)
+        wandb.log(output.metrics, commit=False)
 
         return loss
     
@@ -192,7 +185,7 @@ def train(args, model, train_dataloader, eval_dataloader_or_dataloaders, dp):
     total_loss = 0
     for i, batch in enumerate(train_dataloader, 1):
         with dp.accumulate(model):
-            ids = batch["input_ids"]
+            ids = batch["input_ids"].to(dp.device)
             loss = model_forward(model, ids)
             loss_copy = loss.detach().float()
             total_loss += loss_copy
@@ -223,12 +216,13 @@ def train(args, model, train_dataloader, eval_dataloader_or_dataloaders, dp):
         eval_loss, spend_time = model_eval2(model, eval_dataloader_or_dataloaders)
         print(f"training ends, final eval_loss={eval_loss}")
         wandb.log({}, commit=True)
-    dp.barrier()
 
-    if args.save:
-        from model.megabyte_transformers import MegabyteLMHeadModel
-        model = MegabyteLMHeadModel.from_native_megabyte(model)
-        model.save_pretrained(args.save)
+        if args.save:
+            from model.megabyte_transformers import MegabyteLMHeadModel
+            model = MegabyteLMHeadModel.from_native_megabyte(model)
+            model.save_pretrained(args.save)
+
+    dp.barrier()
 
 
 class MegabyteTokenizer:
@@ -295,7 +289,7 @@ class DataParallel:
         if self.sync_gradients:
             context = contextlib.nullcontext
         else:
-            context = self.no_sync
+            context = model.no_sync
 
         with context(model):
             yield
@@ -307,7 +301,7 @@ class DataParallel:
 def main():
     args = get_args()
 
-    dp = DataParallel()
+    dp = DataParallel(gradient_accumulation_steps=args.gradient_accumulation_steps)
     torch.set_default_device(f"cuda:{dp.local_rank}")
 
     print(f"model megabyte is being created...")
@@ -324,4 +318,5 @@ def main():
 
 
 if __name__ == "__main__":
+    torch.multiprocessing.set_start_method('spawn')
     main()
