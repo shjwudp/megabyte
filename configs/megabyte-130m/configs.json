@@ -1,0 +1,20 @@
+{
+    "D_G": 96,
+    "D_L": 512,
+    "P": 8,
+    "T_MAX": null,
+    "V": 512,
+    "architectures": [
+        "MegabyteLMHeadModel"
+    ],
+    "g_nheads": 12,
+    "g_nlayers": 12,
+    "initializer_range": 0.02,
+    "l_nheads": 8,
+    "l_nlayers": 6,
+    "model_type": "megabyte",
+    "pad_id": 257,
+    "eos_token_id": 258,
+    "torch_dtype": "float32",
+    "transformers_version": "4.28.1"
+}
