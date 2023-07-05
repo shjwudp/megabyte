@@ -29,47 +29,29 @@ def get_model_and_tokenizer(args):
     return model, tokenizer
 
 
-
-def fixed_seq_length_of_datasets(
-    datasets,
-    fixed_seq_length,
-    tokenizer,
-    load_from_cache_file=False,
-):
+def fixed_seq_length_of_datasets(datasets, fixed_seq_length, load_from_cache_file=False):
     block_size = fixed_seq_length
-    pad_id = tokenizer.pad_id
-    eos_token_id = tokenizer.eos_token_id
 
+    # Main data processing function that will concatenate all texts from our dataset and generate chunks of block_size.
     def group_texts(examples):
-        texts = examples["text"]
-        utf8_list = sum([[c.encode("utf-8") for c in text] + [eos_token_id] for text in texts], [])
-
-        chunks = []
-        chunk = []
-        for utf8_bytes_or_eos_token in utf8_list:
-            if type(utf8_bytes_or_eos_token) is int:
-                add_tokens = [eos_token_id]
-            else:
-                add_tokens = list(utf8_bytes_or_eos_token)
-                
-            if len(add_tokens) + len(chunk) > block_size:
-                chunks.append([pad_id]*(block_size-len(chunk)) + chunk)
-                assert len(chunks[-1]) == block_size, f"{len(chunk)}, {block_size-len(chunk)}"
-                chunk = []
-                
-            chunk += add_tokens
-
-        if len(chunk) > 0:
-            chunks.append([pad_id]*(block_size-len(chunk)) + chunk)
-            assert len(chunks[-1]) == block_size, f"{len(chunks[-1])}"
-
-        result = {"input_ids": chunks}
+        # Concatenate all texts.
+        concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
+        total_length = len(concatenated_examples[list(examples.keys())[0]])
+        # We drop the small remainder, we could add padding if the model supported it instead of this drop, you can
+        # customize this part to your needs.
+        if total_length >= block_size:
+            total_length = (total_length // block_size) * block_size
+        # Split by chunks of max_len.
+        result = {
+            k: [t[i : i + block_size] for i in range(0, total_length, block_size)]
+            for k, t in concatenated_examples.items()
+        }
+        result["labels"] = result["input_ids"].copy()
         return result
 
     lm_datasets = datasets.map(
         group_texts,
         batched=True,
-        remove_columns=datasets["train"].column_names,
         num_proc=os.cpu_count(),
         load_from_cache_file=load_from_cache_file,
         desc=f"Grouping texts in chunks of {block_size}",
@@ -99,7 +81,6 @@ def prepare_dataloader(args, tokenizer, dp):
     lm_datasets = fixed_seq_length_of_datasets(
         tokenized_datasets,
         args.max_seq_length,
-        tokenizer=tokenizer,
         load_from_cache_file=not args.overwrite_cache,
     )
 
@@ -119,7 +100,6 @@ def prepare_dataloader(args, tokenizer, dp):
             lm_datasets = fixed_seq_length_of_datasets(
                 tokenized_datasets,
                 eval_seq_length,
-                tokenizer=tokenizer,
                 load_from_cache_file=not args.overwrite_cache,
             )
             eval_dataset = lm_datasets["validation"]
