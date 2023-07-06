@@ -24,12 +24,20 @@ def get_model_and_tokenizer(args):
     config = MegabyteConfig.from_pretrained(args.model_config)
     model = MegabyteLMHeadModel(config, InnerModel=Megabyte)
     model = model.inner_model.to(torch.bfloat16)
-    tokenizer = MegabyteTokenizer(config.eos_token_id)
+    tokenizer = MegabyteTokenizer(
+        eos_token_id=config.eos_token_id,
+        pad_id=config.pad_id,
+    )
 
     return model, tokenizer
 
 
-def fixed_seq_length_of_datasets(datasets, fixed_seq_length, load_from_cache_file=False):
+def fixed_seq_length_of_datasets(
+    datasets,
+    fixed_seq_length,
+    tokenizer,
+    load_from_cache_file=False,
+):
     block_size = fixed_seq_length
 
     # Main data processing function that will concatenate all texts from our dataset and generate chunks of block_size.
@@ -37,10 +45,12 @@ def fixed_seq_length_of_datasets(datasets, fixed_seq_length, load_from_cache_fil
         # Concatenate all texts.
         concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
         total_length = len(concatenated_examples[list(examples.keys())[0]])
-        # We drop the small remainder, we could add padding if the model supported it instead of this drop, you can
-        # customize this part to your needs.
-        if total_length >= block_size:
-            total_length = (total_length // block_size) * block_size
+
+        # Padding in front of tokens to align it with the group size.
+        if total_length % block_size != 0:
+            count_pad_ids = block_size - (total_length % block_size)
+            concatenated_examples[list(examples.keys())[0]] = count_pad_ids*[tokenizer.pad_id] + concatenated_examples[list(examples.keys())[0]]
+
         # Split by chunks of max_len.
         result = {
             k: [t[i : i + block_size] for i in range(0, total_length, block_size)]
@@ -71,7 +81,7 @@ def prepare_dataloader(args, tokenizer, dp):
     text_column_name = "text" if "text" in column_names else column_names[0]
 
     tokenized_datasets = raw_datasets.map(
-        lambda examples: tokenizer(examples[text_column_name]),
+        lambda examples: tokenizer(examples[text_column_name], add_eos_token=True),
         batched=True,
         remove_columns=column_names,
         load_from_cache_file=not args.overwrite_cache,
@@ -80,7 +90,8 @@ def prepare_dataloader(args, tokenizer, dp):
 
     lm_datasets = fixed_seq_length_of_datasets(
         tokenized_datasets,
-        args.max_seq_length,
+        args.seq_length,
+        tokenizer,
         load_from_cache_file=not args.overwrite_cache,
     )
 
@@ -96,10 +107,11 @@ def prepare_dataloader(args, tokenizer, dp):
     if args.length_expolation_eval:
         eval_dataloaders = []
         del tokenized_datasets["train"]
-        for eval_seq_length in [args.max_seq_length, args.max_seq_length*2, args.max_seq_length*8]:
+        for eval_seq_length in [args.seq_length, args.seq_length*2, args.seq_length*8]:
             lm_datasets = fixed_seq_length_of_datasets(
                 tokenized_datasets,
                 eval_seq_length,
+                tokenizer,
                 load_from_cache_file=not args.overwrite_cache,
             )
             eval_dataset = lm_datasets["validation"]
@@ -226,15 +238,18 @@ def train(args, model, train_dataloader, eval_dataloader_or_dataloaders, dp):
 
 
 class MegabyteTokenizer:
-    def __init__(self, eos_token_id):
+    def __init__(self, eos_token_id, pad_id):
         super().__init__()
         self.eos_token_id = eos_token_id
+        self.pad_id = pad_id
         
-    def __call__(self, text_or_list, return_tensors="pt"):
+    def __call__(self, text_or_list, return_tensors="pt", add_eos_token=False):
         if isinstance(text_or_list, str):
             text_or_list = [text_or_list]
 
         tokens = [bytearray(text.encode("utf-8")) for text in text_or_list]
+        if add_eos_token:
+            tokens = [list(x) + [self.eos_token_id] for x in tokens]
 
         return {"input_ids": tokens}
 
@@ -245,7 +260,7 @@ def get_args():
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--eval_batch_size", type=int, default=1)
-    parser.add_argument("--max_seq_length", type=int, default=2048)
+    parser.add_argument("--seq_length", type=int, default=2048)
     parser.add_argument("--length_expolation_eval", action="store_true")
     parser.add_argument("--overwrite_cache", action="store_true")
     parser.add_argument("--dataset_name", required=True)
@@ -291,7 +306,7 @@ class DataParallel:
         else:
             context = model.no_sync
 
-        with context(model):
+        with context():
             yield
             
     def barrier(self):

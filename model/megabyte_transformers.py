@@ -39,7 +39,11 @@ class MegabyteConfig(PretrainedConfig):
         self.eos_token_id = eos_token_id
         self.bos_token_id = eos_token_id
         self.is_encoder_decoder = False
-        super().__init__(**kwargs)
+        super().__init__(
+            **kwargs,
+            bos_token_id=self.bos_token_id,
+            eos_token_id=self.eos_token_id,
+        )
         
     def to_inner_config(self):
         return InnerConfig(
