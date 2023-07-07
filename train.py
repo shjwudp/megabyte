@@ -7,7 +7,7 @@ from contextlib import contextmanager
 import contextlib
 
 import torch
-from datasets import load_dataset
+from datasets import load_dataset, load_from_disk
 from transformers import default_data_collator
 import wandb
 import torch.distributed as dist
@@ -20,120 +20,11 @@ from model.megabyte_transformers import MegabyteConfig, MegabyteLMHeadModel
 
 
 def get_model_and_tokenizer(args):
-    if args.from_pretrained:
-        model = MegabyteLMHeadModel.from_pretrained(args.from_pretrained, Megabyte)
-        model = model.inner_model.to(torch.bfloat16)
-        tokenizer = MegabyteTokenizer(
-            eos_token_id=model.config.eos_id,
-            pad_id=model.config.pad_id,
-        )
-    else:
-        config = MegabyteConfig.from_pretrained(args.model_config)
-        model = MegabyteLMHeadModel(config, InnerModel=Megabyte)
-        model = model.inner_model.to(torch.bfloat16)
-        tokenizer = MegabyteTokenizer(
-            eos_token_id=config.eos_token_id,
-            pad_id=config.pad_id,
-        )
-
-    return model, tokenizer
-
-
-def fixed_seq_length_of_datasets(datasets, fixed_seq_length, load_from_cache_file=False):
-    block_size = fixed_seq_length
-
-    # Main data processing function that will concatenate all texts from our dataset and generate chunks of block_size.
-    def group_texts(examples):
-        # Concatenate all texts.
-        concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
-        total_length = len(concatenated_examples[list(examples.keys())[0]])
-        # We drop the small remainder, we could add padding if the model supported it instead of this drop, you can
-        # customize this part to your needs.
-        if total_length >= block_size:
-            total_length = (total_length // block_size) * block_size
-        # Split by chunks of max_len.
-        result = {
-            k: [t[i : i + block_size] for i in range(0, total_length, block_size)]
-            for k, t in concatenated_examples.items()
-        }
-        result["labels"] = result["input_ids"].copy()
-        return result
-
-    lm_datasets = datasets.map(
-        group_texts,
-        batched=True,
-        load_from_cache_file=load_from_cache_file,
-        desc=f"Grouping texts in chunks of {block_size}",
-    )
-
-    return lm_datasets
-
-
-def prepare_dataloader(args, tokenizer, dp):
-    step_interval = args.gradient_accumulation_steps
-    assert args.batch_size % (dp.world_size * step_interval) == 0
-    per_device_train_batch_size = args.batch_size//(dp.world_size*step_interval)
-    
-    raw_datasets = load_dataset(args.dataset_name, args.dataset_config_name)
-
-    column_names = raw_datasets["train"].column_names
-    text_column_name = "text" if "text" in column_names else column_names[0]
-
-    tokenized_datasets = raw_datasets.map(
-        lambda examples: tokenizer(examples[text_column_name]),
-        batched=True,
-        remove_columns=column_names,
-        load_from_cache_file=not args.overwrite_cache,
-        desc="Running tokenizer on dataset",
-    )
-
-    lm_datasets = fixed_seq_length_of_datasets(
-        tokenized_datasets,
-        args.max_seq_length,
-        load_from_cache_file=not args.overwrite_cache,
-    )
-
-    train_dataset = lm_datasets["train"]
-    # TODO: when DistributedSampler turns on shuffle, Dataloader does not work properly, fix this issue.
-    train_sampler = DistributedSampler(train_dataset, dp.world_size, dp.rank, shuffle=False)
-    train_dataloader = torch.utils.data.DataLoader(
-        train_dataset, shuffle=False, collate_fn=default_data_collator,
-        batch_size=per_device_train_batch_size,
-        sampler=train_sampler,
-        generator=torch.Generator(device="cuda"),
-    )
-    if args.length_expolation_eval:
-        eval_dataloaders = []
-        del tokenized_datasets["train"]
-        for eval_seq_length in [args.max_seq_length, args.max_seq_length*2, args.max_seq_length*8]:
-            lm_datasets = fixed_seq_length_of_datasets(
-                tokenized_datasets,
-                eval_seq_length,
-                load_from_cache_file=not args.overwrite_cache,
-            )
-            eval_dataset = lm_datasets["validation"]
-            eval_dataloader = torch.utils.data.DataLoader(
-                eval_dataset, shuffle=True, collate_fn=default_data_collator,
-                batch_size=args.eval_batch_size,
-                generator=torch.Generator(device=dp.device),
-            )
-            eval_dataloaders.append(eval_dataloader)
-
-        return train_dataloader, eval_dataloaders
-
-    eval_dataset = lm_datasets["validation"]
-    eval_dataloader = torch.utils.data.DataLoader(
-        eval_dataset, shuffle=True, collate_fn=default_data_collator,
-        batch_size=args.eval_batch_size,
-        generator=torch.Generator(device=dp.device),
-    )
-
-    return train_dataloader, eval_dataloader    
-
-=======
+    model = MegabyteLMHeadModel.from_pretrained(args.model_config_or_pretrained_model, Megabyte)
+    model = model.inner_model.to(torch.bfloat16)
     tokenizer = MegabyteTokenizer(
-        eos_token_id=config.eos_token_id,
-        pad_id=config.pad_id,
+        eos_token_id=model.config.eos_id,
+        pad_id=model.config.pad_id,
     )
 
     return model, tokenizer
@@ -181,8 +72,11 @@ def prepare_dataloader(args, tokenizer, dp):
     step_interval = args.gradient_accumulation_steps
     assert args.batch_size % (dp.world_size * step_interval) == 0
     per_device_train_batch_size = args.batch_size//(dp.world_size*step_interval)
-    
-    raw_datasets = load_dataset(args.dataset_name, args.dataset_config_name)
+
+    if args.load_dataset_from_disk:
+        raw_datasets = load_from_disk(args.load_dataset_from_disk)
+    else:
+        raw_datasets = load_dataset(args.dataset_name, args.dataset_config_name)
 
     column_names = raw_datasets["train"].column_names
     text_column_name = "text" if "text" in column_names else column_names[0]
@@ -235,12 +129,9 @@ def prepare_dataloader(args, tokenizer, dp):
     eval_dataloader = torch.utils.data.DataLoader(
         eval_dataset, shuffle=True, collate_fn=default_data_collator,
         batch_size=args.eval_batch_size,
-        generator=torch.Generator(device=dp.device),
     )
 
     return train_dataloader, eval_dataloader    
-
->>>>>>> e896c60703dea4188b0193717f4418780921357d
 
 def train(args, model, train_dataloader, eval_dataloader_or_dataloaders, dp):
     print("start training")
@@ -263,11 +154,7 @@ def train(args, model, train_dataloader, eval_dataloader_or_dataloaders, dp):
     def model_forward(model, ids):
         output = model(ids=ids, return_loss=True, return_metrics=True)
         loss = output.loss
-<<<<<<< HEAD
-        # wandb.log(output.metrics, commit=False)
-=======
         wandb.log(output.metrics, commit=False)
->>>>>>> e896c60703dea4188b0193717f4418780921357d
 
         return loss
     
@@ -309,11 +196,7 @@ def train(args, model, train_dataloader, eval_dataloader_or_dataloaders, dp):
     total_loss = 0
     for i, batch in enumerate(train_dataloader, 1):
         with dp.accumulate(model):
-<<<<<<< HEAD
-            ids = batch["input_ids"]
-=======
             ids = batch["input_ids"].to(dp.device)
->>>>>>> e896c60703dea4188b0193717f4418780921357d
             loss = model_forward(model, ids)
             loss_copy = loss.detach().float()
             total_loss += loss_copy
@@ -344,22 +227,12 @@ def train(args, model, train_dataloader, eval_dataloader_or_dataloaders, dp):
         eval_loss, spend_time = model_eval2(model, eval_dataloader_or_dataloaders)
         print(f"training ends, final eval_loss={eval_loss}")
         wandb.log({}, commit=True)
-<<<<<<< HEAD
-    dp.barrier()
-
-    if args.save:
-        from model.megabyte_transformers import MegabyteLMHeadModel
-        model = MegabyteLMHeadModel.from_native_megabyte(model)
-        model.save_pretrained(args.save)
-=======
-
         if args.save:
             from model.megabyte_transformers import MegabyteLMHeadModel
             model = MegabyteLMHeadModel.from_native_megabyte(model)
             model.save_pretrained(args.save)
 
     dp.barrier()
->>>>>>> e896c60703dea4188b0193717f4418780921357d
 
 
 class MegabyteTokenizer:
@@ -367,48 +240,37 @@ class MegabyteTokenizer:
         super().__init__()
         self.eos_token_id = eos_token_id
         self.pad_id = pad_id
-        
-<<<<<<< HEAD
-    def __call__(self, text_or_list, return_tensors="pt"):
-=======
+
     def __call__(self, text_or_list, return_tensors="pt", add_eos_token=False):
->>>>>>> e896c60703dea4188b0193717f4418780921357d
         if isinstance(text_or_list, str):
             text_or_list = [text_or_list]
 
         tokens = [bytearray(text.encode("utf-8")) for text in text_or_list]
-<<<<<<< HEAD
-=======
         if add_eos_token:
             tokens = [list(x) + [self.eos_token_id] for x in tokens]
->>>>>>> e896c60703dea4188b0193717f4418780921357d
 
         return {"input_ids": tokens}
 
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model_config", required=True)
+    parser.add_argument("--model_config_or_pretrained_model", required=True)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--eval_batch_size", type=int, default=1)
-<<<<<<< HEAD
-    parser.add_argument("--max_seq_length", type=int, default=2048)
-=======
     parser.add_argument("--seq_length", type=int, default=2048)
->>>>>>> e896c60703dea4188b0193717f4418780921357d
     parser.add_argument("--length_expolation_eval", action="store_true")
     parser.add_argument("--overwrite_cache", action="store_true")
-    parser.add_argument("--dataset_name", required=True)
-    parser.add_argument("--dataset_config_name", required=True)
+    parser.add_argument("--dataset_name", default=None)
+    parser.add_argument("--dataset_config_name", default=None)
     parser.add_argument("--gpu", action="store_true")
     parser.add_argument("--eval_interval", default=1000, type=int)
     parser.add_argument("--save", default=None)
+    parser.add_argument("--load_dataset_from_disk", default=None)
     args = parser.parse_args()
     
     return args
-    
-<<<<<<< HEAD
+
 
 class DataParallel:
     def __init__(self, gradient_accumulation_steps=1):
@@ -431,7 +293,6 @@ class DataParallel:
 
         yield
 
-=======
 
 class DataParallel:
     def __init__(self, gradient_accumulation_steps=1):
@@ -454,7 +315,6 @@ class DataParallel:
 
         yield
 
->>>>>>> e896c60703dea4188b0193717f4418780921357d
         if self.is_main_process:
             dist.barrier()
     
@@ -465,15 +325,9 @@ class DataParallel:
         if self.sync_gradients:
             context = contextlib.nullcontext
         else:
-<<<<<<< HEAD
-            context = self.no_sync
-
-        with context(model):
-=======
             context = model.no_sync
 
         with context():
->>>>>>> e896c60703dea4188b0193717f4418780921357d
             yield
             
     def barrier(self):
@@ -483,11 +337,7 @@ class DataParallel:
 def main():
     args = get_args()
 
-<<<<<<< HEAD
-    dp = DataParallel()
-=======
     dp = DataParallel(gradient_accumulation_steps=args.gradient_accumulation_steps)
->>>>>>> e896c60703dea4188b0193717f4418780921357d
     torch.set_default_device(f"cuda:{dp.local_rank}")
 
     print(f"model megabyte is being created...")

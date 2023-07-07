@@ -1,3 +1,5 @@
+import os
+
 import torch
 import torch.nn.functional as F
 from transformers import PretrainedConfig, PreTrainedModel, GenerationMixin
@@ -100,9 +102,13 @@ class MegabyteLMHeadModel(PreTrainedModel, GenerationMixin):
     def from_pretrained(cls, pretrained_model_path, InnerModel):
         config = cls.config_class.from_pretrained(pretrained_model_path)
         model = cls(config, InnerModel)
-        state_dict = torch.load(os.path.join(pretrained_model_path, "pytorch_model.bin"))
-        state_dict = {key[len("inner_model."):]: value for key, value in state_dict.items()}
-        model.inner_model.load_state_dict(state_dict)
+
+        pretrained_model = os.path.join(pretrained_model_path, "pytorch_model.bin")
+        if os.path.exists(pretrained_model):
+            state_dict = torch.load(pretrained_model)
+            state_dict = {key[len("inner_model."):]: value for key, value in state_dict.items()}
+            model.inner_model.load_state_dict(state_dict)
+
         return model
 
     def forward(
