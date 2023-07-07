@@ -2,22 +2,13 @@ import argparse
 from itertools import chain
 import json
 import time
-import logging
 import os
-from collections import namedtuple
 from contextlib import contextmanager
 import contextlib
 
 import torch
-import datasets
-import transformers
 from datasets import load_dataset
-from transformers import (
-    GPT2Tokenizer,
-    GPT2LMHeadModel,
-    GPT2Config,
-    default_data_collator,
-)
+from transformers import default_data_collator
 import wandb
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
@@ -29,10 +20,21 @@ from model.megabyte_transformers import MegabyteConfig, MegabyteLMHeadModel
 
 
 def get_model_and_tokenizer(args):
-    config = MegabyteConfig.from_pretrained(args.model_config)
-    model = MegabyteLMHeadModel(config, InnerModel=Megabyte)
-    model = model.inner_model.to(torch.bfloat16)
-    tokenizer = MegabyteTokenizer(config.eos_token_id)
+    if args.from_pretrained:
+        model = MegabyteLMHeadModel.from_pretrained(args.from_pretrained, Megabyte)
+        model = model.inner_model.to(torch.bfloat16)
+        tokenizer = MegabyteTokenizer(
+            eos_token_id=model.config.eos_id,
+            pad_id=model.config.pad_id,
+        )
+    else:
+        config = MegabyteConfig.from_pretrained(args.model_config)
+        model = MegabyteLMHeadModel(config, InnerModel=Megabyte)
+        model = model.inner_model.to(torch.bfloat16)
+        tokenizer = MegabyteTokenizer(
+            eos_token_id=config.eos_token_id,
+            pad_id=config.pad_id,
+        )
 
     return model, tokenizer
 
@@ -128,6 +130,117 @@ def prepare_dataloader(args, tokenizer, dp):
 
     return train_dataloader, eval_dataloader    
 
+=======
+    tokenizer = MegabyteTokenizer(
+        eos_token_id=config.eos_token_id,
+        pad_id=config.pad_id,
+    )
+
+    return model, tokenizer
+
+
+def fixed_seq_length_of_datasets(
+    datasets,
+    fixed_seq_length,
+    tokenizer,
+    load_from_cache_file=False,
+):
+    block_size = fixed_seq_length
+
+    # Main data processing function that will concatenate all texts from our dataset and generate chunks of block_size.
+    def group_texts(examples):
+        # Concatenate all texts.
+        concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
+        total_length = len(concatenated_examples[list(examples.keys())[0]])
+
+        # Padding in front of tokens to align it with the group size.
+        if total_length % block_size != 0:
+            count_pad_ids = block_size - (total_length % block_size)
+            concatenated_examples[list(examples.keys())[0]] = count_pad_ids*[tokenizer.pad_id] + concatenated_examples[list(examples.keys())[0]]
+
+        # Split by chunks of max_len.
+        result = {
+            k: [t[i : i + block_size] for i in range(0, total_length, block_size)]
+            for k, t in concatenated_examples.items()
+        }
+        result["labels"] = result["input_ids"].copy()
+        return result
+
+    lm_datasets = datasets.map(
+        group_texts,
+        batched=True,
+        num_proc=os.cpu_count(),
+        load_from_cache_file=load_from_cache_file,
+        desc=f"Grouping texts in chunks of {block_size}",
+    )
+
+    return lm_datasets
+
+
+def prepare_dataloader(args, tokenizer, dp):
+    step_interval = args.gradient_accumulation_steps
+    assert args.batch_size % (dp.world_size * step_interval) == 0
+    per_device_train_batch_size = args.batch_size//(dp.world_size*step_interval)
+    
+    raw_datasets = load_dataset(args.dataset_name, args.dataset_config_name)
+
+    column_names = raw_datasets["train"].column_names
+    text_column_name = "text" if "text" in column_names else column_names[0]
+
+    tokenized_datasets = raw_datasets.map(
+        lambda examples: tokenizer(examples[text_column_name], add_eos_token=True),
+        batched=True,
+        remove_columns=column_names,
+        load_from_cache_file=not args.overwrite_cache,
+        desc="Running tokenizer on dataset",
+    )
+
+    lm_datasets = fixed_seq_length_of_datasets(
+        tokenized_datasets,
+        args.seq_length,
+        tokenizer,
+        load_from_cache_file=not args.overwrite_cache,
+    )
+
+    train_dataset = lm_datasets["train"]
+    # TODO: when DistributedSampler turns on shuffle, Dataloader does not work properly, fix this issue.
+    train_sampler = DistributedSampler(train_dataset, dp.world_size, dp.rank, shuffle=False)
+    train_dataloader = torch.utils.data.DataLoader(
+        train_dataset, shuffle=False, collate_fn=default_data_collator,
+        batch_size=per_device_train_batch_size,
+        sampler=train_sampler,
+        num_workers=1,
+    )
+    if args.length_expolation_eval:
+        eval_dataloaders = []
+        del tokenized_datasets["train"]
+        for eval_seq_length in [args.seq_length, args.seq_length*2, args.seq_length*8]:
+            lm_datasets = fixed_seq_length_of_datasets(
+                tokenized_datasets,
+                eval_seq_length,
+                tokenizer,
+                load_from_cache_file=not args.overwrite_cache,
+            )
+            eval_dataset = lm_datasets["validation"]
+            eval_dataloader = torch.utils.data.DataLoader(
+                eval_dataset, shuffle=True, collate_fn=default_data_collator,
+                batch_size=args.eval_batch_size,
+                generator=torch.Generator(device=dp.device),
+            )
+            eval_dataloaders.append(eval_dataloader)
+
+        return train_dataloader, eval_dataloaders
+
+    eval_dataset = lm_datasets["validation"]
+    eval_dataloader = torch.utils.data.DataLoader(
+        eval_dataset, shuffle=True, collate_fn=default_data_collator,
+        batch_size=args.eval_batch_size,
+        generator=torch.Generator(device=dp.device),
+    )
+
+    return train_dataloader, eval_dataloader    
+
+>>>>>>> e896c60703dea4188b0193717f4418780921357d
 
 def train(args, model, train_dataloader, eval_dataloader_or_dataloaders, dp):
     print("start training")
@@ -150,7 +263,11 @@ def train(args, model, train_dataloader, eval_dataloader_or_dataloaders, dp):
     def model_forward(model, ids):
         output = model(ids=ids, return_loss=True, return_metrics=True)
         loss = output.loss
+<<<<<<< HEAD
         # wandb.log(output.metrics, commit=False)
+=======
+        wandb.log(output.metrics, commit=False)
+>>>>>>> e896c60703dea4188b0193717f4418780921357d
 
         return loss
     
@@ -192,7 +309,11 @@ def train(args, model, train_dataloader, eval_dataloader_or_dataloaders, dp):
     total_loss = 0
     for i, batch in enumerate(train_dataloader, 1):
         with dp.accumulate(model):
+<<<<<<< HEAD
             ids = batch["input_ids"]
+=======
+            ids = batch["input_ids"].to(dp.device)
+>>>>>>> e896c60703dea4188b0193717f4418780921357d
             loss = model_forward(model, ids)
             loss_copy = loss.detach().float()
             total_loss += loss_copy
@@ -223,24 +344,44 @@ def train(args, model, train_dataloader, eval_dataloader_or_dataloaders, dp):
         eval_loss, spend_time = model_eval2(model, eval_dataloader_or_dataloaders)
         print(f"training ends, final eval_loss={eval_loss}")
         wandb.log({}, commit=True)
+<<<<<<< HEAD
     dp.barrier()
 
     if args.save:
         from model.megabyte_transformers import MegabyteLMHeadModel
         model = MegabyteLMHeadModel.from_native_megabyte(model)
         model.save_pretrained(args.save)
+=======
+
+        if args.save:
+            from model.megabyte_transformers import MegabyteLMHeadModel
+            model = MegabyteLMHeadModel.from_native_megabyte(model)
+            model.save_pretrained(args.save)
+
+    dp.barrier()
+>>>>>>> e896c60703dea4188b0193717f4418780921357d
 
 
 class MegabyteTokenizer:
-    def __init__(self, eos_token_id):
+    def __init__(self, eos_token_id, pad_id):
         super().__init__()
         self.eos_token_id = eos_token_id
+        self.pad_id = pad_id
         
+<<<<<<< HEAD
     def __call__(self, text_or_list, return_tensors="pt"):
+=======
+    def __call__(self, text_or_list, return_tensors="pt", add_eos_token=False):
+>>>>>>> e896c60703dea4188b0193717f4418780921357d
         if isinstance(text_or_list, str):
             text_or_list = [text_or_list]
 
         tokens = [bytearray(text.encode("utf-8")) for text in text_or_list]
+<<<<<<< HEAD
+=======
+        if add_eos_token:
+            tokens = [list(x) + [self.eos_token_id] for x in tokens]
+>>>>>>> e896c60703dea4188b0193717f4418780921357d
 
         return {"input_ids": tokens}
 
@@ -251,7 +392,11 @@ def get_args():
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--eval_batch_size", type=int, default=1)
+<<<<<<< HEAD
     parser.add_argument("--max_seq_length", type=int, default=2048)
+=======
+    parser.add_argument("--seq_length", type=int, default=2048)
+>>>>>>> e896c60703dea4188b0193717f4418780921357d
     parser.add_argument("--length_expolation_eval", action="store_true")
     parser.add_argument("--overwrite_cache", action="store_true")
     parser.add_argument("--dataset_name", required=True)
@@ -263,6 +408,7 @@ def get_args():
     
     return args
     
+<<<<<<< HEAD
 
 class DataParallel:
     def __init__(self, gradient_accumulation_steps=1):
@@ -285,6 +431,30 @@ class DataParallel:
 
         yield
 
+=======
+
+class DataParallel:
+    def __init__(self, gradient_accumulation_steps=1):
+        # TODO: init process group with backend "nccl|gloo" does not work, fix this issue. 
+        dist.init_process_group(backend="nccl")
+        self.world_size = dist.get_world_size()
+        self.rank = dist.get_rank()
+        self.local_rank = int(os.environ["LOCAL_RANK"])
+        self.sync_gradients = False
+        self.completed_steps = 0
+        self.num_forward = 0
+        self.gradient_accumulation_steps = gradient_accumulation_steps
+        self.device = f"cuda:{self.local_rank}"
+        self.is_main_process = (self.rank == 0)
+        
+    @contextmanager
+    def main_process_first(self):
+        if not self.is_main_process:
+            dist.barrier()
+
+        yield
+
+>>>>>>> e896c60703dea4188b0193717f4418780921357d
         if self.is_main_process:
             dist.barrier()
     
@@ -295,9 +465,15 @@ class DataParallel:
         if self.sync_gradients:
             context = contextlib.nullcontext
         else:
+<<<<<<< HEAD
             context = self.no_sync
 
         with context(model):
+=======
+            context = model.no_sync
+
+        with context():
+>>>>>>> e896c60703dea4188b0193717f4418780921357d
             yield
             
     def barrier(self):
@@ -307,7 +483,11 @@ class DataParallel:
 def main():
     args = get_args()
 
+<<<<<<< HEAD
     dp = DataParallel()
+=======
+    dp = DataParallel(gradient_accumulation_steps=args.gradient_accumulation_steps)
+>>>>>>> e896c60703dea4188b0193717f4418780921357d
     torch.set_default_device(f"cuda:{dp.local_rank}")
 
     print(f"model megabyte is being created...")
@@ -324,4 +504,5 @@ def main():
 
 
 if __name__ == "__main__":
+    torch.multiprocessing.set_start_method('spawn')
     main()

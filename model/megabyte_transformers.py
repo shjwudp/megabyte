@@ -39,7 +39,12 @@ class MegabyteConfig(PretrainedConfig):
         self.eos_token_id = eos_token_id
         self.bos_token_id = eos_token_id
         self.is_encoder_decoder = False
-        super().__init__(**kwargs)
+
+        super().__init__(
+            **kwargs,
+            bos_token_id=self.bos_token_id,
+            eos_token_id=self.eos_token_id,
+        )
         
     def to_inner_config(self):
         return InnerConfig(
@@ -89,6 +94,15 @@ class MegabyteLMHeadModel(PreTrainedModel, GenerationMixin):
         model = cls(config)
         model.config = config
         model.inner_model = native_model
+        return model
+    
+    @classmethod
+    def from_pretrained(cls, pretrained_model_path, InnerModel):
+        config = cls.config_class.from_pretrained(pretrained_model_path)
+        model = cls(config, InnerModel)
+        state_dict = torch.load(os.path.join(pretrained_model_path, "pytorch_model.bin"))
+        state_dict = {key[len("inner_model."):]: value for key, value in state_dict.items()}
+        model.inner_model.load_state_dict(state_dict)
         return model
 
     def forward(
