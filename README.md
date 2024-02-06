@@ -71,11 +71,11 @@ print(texts)
 
 You can use the [benchmark.py](https://github.com/shjwudp/megabyte/blob/main/benchmark.py) script for Megabyte's performance measurement. The following table compares the training of Megabyte and GPT2 on wikitext-103-v1 with the same parameter scale.
 
-| model                   | # of parameters | training speed (KB/s) | GPU Memory Allocated % | eval loss | eval loss bpc |
+| model                   | # of parameters (M) | training speed (KB/s) | GPU Memory Allocated % | eval loss ↓ | eval loss bpc ↓ |
 | :---------------------- | :-------------- | :-------------------- | :--------------------- | :-------- | :------------ |
-| gpt2                    | 124439808       | 143.68                | 42.97                  | 5.06      | 1.10          |
-| megabyte(P=8)           | 132278528       | 189.13                | 17.62                  | 1.13      | 1.13          |
-| megabyte_in_action(P=8) | 131918336       | 197.47                | 18.69                  | 1.09      | 1.09          |
+| gpt2                    | 119       | 143.68                | 42.97                  | 5.06      | 1.10          |
+| megabyte(P=8)           | 126       | 189.13                | 17.62                  | 1.13      | 1.13          |
+| megabyte_in_action(P=8) | 126       | 197.47                | 18.69                  | 1.09      | 1.09          |
 
 ## Citation
 
